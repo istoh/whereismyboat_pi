@@ -65,10 +65,11 @@ private:
   struct Shown {
     wxRect area;
     double scale_ppm = 0;
+    double pixel_scale = 1;  ///< Viewport pixels per logical pixel
   };
 
   bool HasPosition() const;
-  bool Draw(piDC& dc, PlugIn_ViewPort* vp, int canvas);
+  bool Draw(piDC& dc, PlugIn_ViewPort* vp, int canvas, bool gl);
 
   wxBitmap m_panel_bitmap;
   Settings m_settings;

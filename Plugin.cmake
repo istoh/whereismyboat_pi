@@ -23,7 +23,7 @@ set(OCPN_RELEASE_REPO
 )
 
 set(PKG_NAME WhereIsMyBoat_pi)
-set(PKG_VERSION 0.2.0) # Major.Minor.Patch
+set(PKG_VERSION 0.2.1) # Major.Minor.Patch
 set(PKG_PRERELEASE "")  # Empty, or a tag like 'beta'
 
 set(DISPLAY_NAME WhereIsMyBoat)    # Dialogs, installer artifacts, ...

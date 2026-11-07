@@ -49,6 +49,42 @@ wxPoint At(double x, double y) {
   return wxPoint(static_cast<int>(std::lround(x)), static_cast<int>(std::lround(y)));
 }
 
+/**
+ * Fill and outline the arrow. piDC cannot fill polygons with desktop OpenGL
+ * (that code is Android-only), so with OpenGL the arrow is filled with a fan
+ * of thick lines from the tip.
+ */
+void DrawArrow(piDC& dc, bool gl, const wxPoint (&points)[4], const wxColour& fill,
+               const wxColour& outline, int outline_width) {
+  if (!gl) {
+    dc.SetPen(wxPen(outline, outline_width));
+    dc.SetBrush(wxBrush(fill));
+    dc.DrawPolygon(4, const_cast<wxPoint*>(points));
+    return;
+  }
+  const wxPoint& tip = points[0];
+  dc.SetPen(wxPen(fill, 3));
+  for (int edge = 1; edge <= 2; ++edge) {  // back edges: base-notch, notch-base
+    const wxPoint& a = points[edge];
+    const wxPoint& b = points[edge + 1 > 3 ? 1 : edge + 1];
+    const int steps = std::max(1, static_cast<int>(std::hypot(b.x - a.x, b.y - a.y) / 1.5));
+    for (int i = 0; i <= steps; ++i) {
+      const double t = static_cast<double>(i) / steps;
+      dc.DrawLine(tip.x, tip.y, static_cast<int>(std::lround(a.x + (b.x - a.x) * t)),
+                  static_cast<int>(std::lround(a.y + (b.y - a.y) * t)));
+    }
+  }
+  wxPoint loop[5] = {points[0], points[1], points[2], points[3], points[0]};
+  dc.SetPen(wxPen(outline, outline_width));
+  dc.DrawLines(5, loop);
+}
+
+/** Pixels per logical pixel on a canvas: 2 on a HiDPI screen at 200 %. */
+double ContentScale(int canvas) {
+  wxWindow* window = GetCanvasByIndex(canvas);
+  return window ? window->GetContentScaleFactor() : 1.0;
+}
+
 }  // namespace
 
 WhereIsMyBoatPi::WhereIsMyBoatPi(void* ppimgr) : opencpn_plugin_118(ppimgr) {
@@ -108,7 +144,7 @@ bool WhereIsMyBoatPi::RenderOverlayMultiCanvas(wxDC& dc, PlugIn_ViewPort* vp,
                                                int canvas, int priority) {
   if (priority != OVERLAY_OVER_UI) return false;
   piDC pidc(dc);
-  return Draw(pidc, vp, canvas);
+  return Draw(pidc, vp, canvas, false);
 }
 
 bool WhereIsMyBoatPi::RenderGLOverlayMultiCanvas(wxGLContext* context,
@@ -117,10 +153,10 @@ bool WhereIsMyBoatPi::RenderGLOverlayMultiCanvas(wxGLContext* context,
   if (priority != OVERLAY_OVER_UI) return false;
   piDC pidc(context);
   pidc.SetVP(vp);
-  return Draw(pidc, vp, canvas);
+  return Draw(pidc, vp, canvas, true);
 }
 
-bool WhereIsMyBoatPi::Draw(piDC& dc, PlugIn_ViewPort* vp, int canvas) {
+bool WhereIsMyBoatPi::Draw(piDC& dc, PlugIn_ViewPort* vp, int canvas, bool gl) {
   m_shown.erase(canvas);
   if (!HasPosition() || !vp || !vp->bValid) return false;
 
@@ -145,7 +181,10 @@ bool WhereIsMyBoatPi::Draw(piDC& dc, PlugIn_ViewPort* vp, int canvas) {
   const double angle = ScreenAngle(probe.x - centre.x, probe.y - centre.y);
 
   const Settings& look = m_settings;
-  const double size = look.arrow_size / 1.2;  // the arrow is 1.2 * size long
+  // With OpenGL the viewport is in physical pixels; sizes are set in logical
+  // ones, and text is measured in logical pixels but drawn in physical ones.
+  const double scale = gl ? ContentScale(canvas) : 1.0;
+  const double size = look.arrow_size * scale / 1.2;  // the arrow is 1.2 * size long
   const EdgePointer tip = PointerAtEdge(width, height, angle, size);
   const double ux = std::sin(angle), uy = -std::cos(angle);  // towards the boat
   const double nx = -uy, ny = ux;                            // across the arrow
@@ -159,9 +198,7 @@ bool WhereIsMyBoatPi::Draw(piDC& dc, PlugIn_ViewPort* vp, int canvas) {
       At(tip.x - ux * size * 0.25, tip.y - uy * size * 0.25),
       At(tip.x - ux * size * 0.6 - nx * size * 0.55, tip.y - uy * size * 0.6 - ny * size * 0.55),
   };
-  dc.SetPen(wxPen(look.outline, std::max(1, static_cast<int>(size / 12))));
-  dc.SetBrush(wxBrush(fill));
-  dc.DrawPolygon(4, arrow);
+  DrawArrow(dc, gl, arrow, fill, look.outline, std::max(1, static_cast<int>(size / 12)));
 
   // Distance and bearing from the chart centre, inside the arrow.
   wxString label = FormatDistance(course.distance);
@@ -170,16 +207,18 @@ bool WhereIsMyBoatPi::Draw(piDC& dc, PlugIn_ViewPort* vp, int canvas) {
   dc.SetFont(look.font);
   wxCoord text_w, text_h;
   dc.GetTextExtent(label, &text_w, &text_h);
+  text_w = static_cast<wxCoord>(std::lround(text_w * scale));
+  text_h = static_cast<wxCoord>(std::lround(text_h * scale));
   const int pad = std::max(3, static_cast<int>(text_h / 4));
   const int box_w = text_w + 2 * pad;
   const int box_h = text_h + 2 * pad;
-  // Centre the box behind the arrow, kept inside the chart.
-  const int box_x = std::clamp(
-      static_cast<int>(std::lround(tip.x - ux * (size + box_w / 2.0) - box_w / 2.0)), 2,
-      std::max(2, static_cast<int>(width) - box_w - 2));
-  const int box_y = std::clamp(
-      static_cast<int>(std::lround(tip.y - uy * (size + box_h / 2.0) - box_h / 2.0)), 2,
-      std::max(2, static_cast<int>(height) - box_h - 2));
+  // Centre the box just behind the arrow, kept inside the chart. Its half
+  // extent along the arrow decides how far back the centre goes.
+  const double back = 0.6 * size + 6 * scale + std::abs(ux) * box_w / 2.0 + std::abs(uy) * box_h / 2.0;
+  const int box_x = std::clamp(static_cast<int>(std::lround(tip.x - ux * back - box_w / 2.0)), 2,
+                               std::max(2, static_cast<int>(width) - box_w - 2));
+  const int box_y = std::clamp(static_cast<int>(std::lround(tip.y - uy * back - box_h / 2.0)), 2,
+                               std::max(2, static_cast<int>(height) - box_h - 2));
   dc.SetPen(wxPen(fill, 2));
   dc.SetBrush(wxBrush(wxColour(look.background.Red(), look.background.Green(),
                                look.background.Blue(), look.background_alpha)));
@@ -189,7 +228,7 @@ bool WhereIsMyBoatPi::Draw(piDC& dc, PlugIn_ViewPort* vp, int canvas) {
 
   wxRect area(box_x, box_y, box_w, box_h);
   for (const auto& point : arrow) area.Union(wxRect(point, wxSize(1, 1)));
-  m_shown[canvas] = {area.Inflate(pad), vp->view_scale_ppm};
+  m_shown[canvas] = {area.Inflate(pad), vp->view_scale_ppm, scale};
   return true;
 }
 
@@ -198,9 +237,9 @@ bool WhereIsMyBoatPi::MouseEventHook(wxMouseEvent& event) {
   const int canvas = GetCanvasIndexUnderMouse();
   const auto shown = m_shown.find(canvas);
   if (shown == m_shown.end()) return false;
-  // The viewport is in physical pixels, mouse events in logical ones.
+  // The arrow was drawn in viewport pixels; mouse events are logical.
   wxWindow* window = GetCanvasByIndex(canvas);
-  const double scale = window ? window->GetContentScaleFactor() : 1.0;
+  const double scale = shown->second.pixel_scale;
   const wxPoint position(static_cast<int>(event.GetX() * scale),
                          static_cast<int>(event.GetY() * scale));
   if (!shown->second.area.Contains(position)) return false;
