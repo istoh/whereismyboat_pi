@@ -28,6 +28,7 @@
 #include <wx/wx.h>
 
 #include "ocpn_plugin.h"
+#include "settings.h"
 
 class piDC;
 
@@ -51,6 +52,7 @@ public:
   wxString GetShortDescription() override;
   wxString GetLongDescription() override;
 
+  void ShowPreferencesDialog(wxWindow* parent) override;
   void SetPositionFixEx(PlugIn_Position_Fix_Ex& fix) override;
   bool MouseEventHook(wxMouseEvent& event) override;
   bool RenderOverlayMultiCanvas(wxDC& dc, PlugIn_ViewPort* vp, int canvas,
@@ -65,13 +67,15 @@ private:
     double scale_ppm = 0;
   };
 
-  bool HasFix() const;
+  bool HasPosition() const;
   bool Draw(piDC& dc, PlugIn_ViewPort* vp, int canvas);
 
   wxBitmap m_panel_bitmap;
+  Settings m_settings;
+  bool m_has_position = false;
   double m_lat = 0;
   double m_lon = 0;
-  time_t m_fix_time = 0;
+  time_t m_fix_time = 0;  ///< When the last real fix arrived, 0 if none yet
   std::map<int, Shown> m_shown;
 };
 

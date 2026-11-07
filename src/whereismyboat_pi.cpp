@@ -21,10 +21,12 @@
 #include <string>
 
 #include <wx/filename.h>
+#include <wx/fileconf.h>
 
 #include "config.h"
 #include "pidc.h"
 #include "pointer.h"
+#include "preferences.h"
 
 extern "C" DECL_EXP opencpn_plugin* create_pi(void* ppimgr) {
   return new WhereIsMyBoatPi(ppimgr);
@@ -57,8 +59,17 @@ WhereIsMyBoatPi::WhereIsMyBoatPi(void* ppimgr) : opencpn_plugin_118(ppimgr) {
 }
 
 int WhereIsMyBoatPi::Init() {
+  m_settings.Load(GetOCPNConfigObject());
   return WANTS_OVERLAY_CALLBACK | WANTS_OPENGL_OVERLAY_CALLBACK |
-         WANTS_NMEA_EVENTS | WANTS_MOUSE_EVENTS;
+         WANTS_NMEA_EVENTS | WANTS_MOUSE_EVENTS | WANTS_PREFERENCES | WANTS_CONFIG;
+}
+
+void WhereIsMyBoatPi::ShowPreferencesDialog(wxWindow* parent) {
+  PreferencesDialog dialog(parent, m_settings);
+  if (dialog.ShowModal() != wxID_OK) return;
+  m_settings = dialog.GetSettings();
+  m_settings.Save(GetOCPNConfigObject());
+  RequestRefresh(GetOCPNCanvasWindow());
 }
 
 bool WhereIsMyBoatPi::DeInit() { return true; }
@@ -82,13 +93,16 @@ wxString WhereIsMyBoatPi::GetShortDescription() { return PKG_SUMMARY; }
 wxString WhereIsMyBoatPi::GetLongDescription() { return PKG_DESCRIPTION; }
 
 void WhereIsMyBoatPi::SetPositionFixEx(PlugIn_Position_Fix_Ex& fix) {
-  if (std::isnan(fix.Lat) || std::isnan(fix.Lon) || fix.FixTime == 0) return;
+  if (std::isnan(fix.Lat) || std::isnan(fix.Lon)) return;
+  // Without GNSS data OpenCPN keeps sending the last known position with
+  // FixTime 0; point to it, but show it as old.
+  m_has_position = true;
   m_lat = fix.Lat;
   m_lon = fix.Lon;
-  m_fix_time = wxDateTime::Now().GetTicks();
+  if (fix.FixTime != 0) m_fix_time = wxDateTime::Now().GetTicks();
 }
 
-bool WhereIsMyBoatPi::HasFix() const { return m_fix_time != 0; }
+bool WhereIsMyBoatPi::HasPosition() const { return m_has_position; }
 
 bool WhereIsMyBoatPi::RenderOverlayMultiCanvas(wxDC& dc, PlugIn_ViewPort* vp,
                                                int canvas, int priority) {
@@ -108,7 +122,7 @@ bool WhereIsMyBoatPi::RenderGLOverlayMultiCanvas(wxGLContext* context,
 
 bool WhereIsMyBoatPi::Draw(piDC& dc, PlugIn_ViewPort* vp, int canvas) {
   m_shown.erase(canvas);
-  if (!HasFix() || !vp || !vp->bValid) return false;
+  if (!HasPosition() || !vp || !vp->bValid) return false;
 
   const double width = vp->pix_width;
   const double height = vp->pix_height;
@@ -130,32 +144,33 @@ bool WhereIsMyBoatPi::Draw(piDC& dc, PlugIn_ViewPort* vp, int canvas) {
   GetCanvasPixLL(vp, &probe, probe_lat, probe_lon);
   const double angle = ScreenAngle(probe.x - centre.x, probe.y - centre.y);
 
-  const double size = 22 * GetOCPNGUIToolScaleFactor_PlugIn();
+  const Settings& look = m_settings;
+  const double size = look.arrow_size / 1.2;  // the arrow is 1.2 * size long
   const EdgePointer tip = PointerAtEdge(width, height, angle, size);
   const double ux = std::sin(angle), uy = -std::cos(angle);  // towards the boat
   const double nx = -uy, ny = ux;                            // across the arrow
 
-  const bool stale = wxDateTime::Now().GetTicks() - m_fix_time > kStaleFix;
-  const wxColour fill = stale ? wxColour(140, 140, 140) : wxColour(230, 81, 0);
+  const bool no_fix = m_fix_time == 0;
+  const bool stale = no_fix || wxDateTime::Now().GetTicks() - m_fix_time > kStaleFix;
+  const wxColour fill = stale ? wxColour(140, 140, 140) : look.arrow;
   wxPoint arrow[4] = {
       At(tip.x + ux * size * 0.6, tip.y + uy * size * 0.6),
       At(tip.x - ux * size * 0.6 + nx * size * 0.55, tip.y - uy * size * 0.6 + ny * size * 0.55),
       At(tip.x - ux * size * 0.25, tip.y - uy * size * 0.25),
       At(tip.x - ux * size * 0.6 - nx * size * 0.55, tip.y - uy * size * 0.6 - ny * size * 0.55),
   };
-  dc.SetPen(wxPen(wxColour(40, 40, 40), std::max(1, static_cast<int>(size / 12))));
+  dc.SetPen(wxPen(look.outline, std::max(1, static_cast<int>(size / 12))));
   dc.SetBrush(wxBrush(fill));
   dc.DrawPolygon(4, arrow);
 
   // Distance and bearing from the chart centre, inside the arrow.
-  wxString label = FormatDistance(course.distance) +
-                   wxString::Format("  %03.0f°", course.bearing) +
-                   (stale ? _(" (old fix)") : wxString());
-  wxFont* font = GetOCPNScaledFont_PlugIn(_("Dialog"));
-  dc.SetFont(*font);
+  wxString label = FormatDistance(course.distance);
+  if (look.show_bearing) label += wxString::Format(L"  %03.0f\u00B0", course.bearing);
+  if (stale) label += no_fix ? _(" (no fix)") : _(" (old fix)");
+  dc.SetFont(look.font);
   wxCoord text_w, text_h;
   dc.GetTextExtent(label, &text_w, &text_h);
-  const int pad = static_cast<int>(size / 4);
+  const int pad = std::max(3, static_cast<int>(text_h / 4));
   const int box_w = text_w + 2 * pad;
   const int box_h = text_h + 2 * pad;
   // Centre the box behind the arrow, kept inside the chart.
@@ -166,9 +181,10 @@ bool WhereIsMyBoatPi::Draw(piDC& dc, PlugIn_ViewPort* vp, int canvas) {
       static_cast<int>(std::lround(tip.y - uy * (size + box_h / 2.0) - box_h / 2.0)), 2,
       std::max(2, static_cast<int>(height) - box_h - 2));
   dc.SetPen(wxPen(fill, 2));
-  dc.SetBrush(wxBrush(wxColour(255, 255, 255, 220)));
+  dc.SetBrush(wxBrush(wxColour(look.background.Red(), look.background.Green(),
+                               look.background.Blue(), look.background_alpha)));
   dc.DrawRoundedRectangle(box_x, box_y, box_w, box_h, pad);
-  dc.SetTextForeground(wxColour(20, 20, 20));
+  dc.SetTextForeground(look.text);
   dc.DrawText(label, box_x + pad, box_y + pad);
 
   wxRect area(box_x, box_y, box_w, box_h);

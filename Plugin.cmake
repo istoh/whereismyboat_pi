@@ -23,7 +23,7 @@ set(OCPN_RELEASE_REPO
 )
 
 set(PKG_NAME WhereIsMyBoat_pi)
-set(PKG_VERSION 0.1.0) # Major.Minor.Patch
+set(PKG_VERSION 0.2.0) # Major.Minor.Patch
 set(PKG_PRERELEASE "")  # Empty, or a tag like 'beta'
 
 set(DISPLAY_NAME WhereIsMyBoat)    # Dialogs, installer artifacts, ...
@@ -45,6 +45,10 @@ set(SRC
     src/whereismyboat_pi.cpp
     src/pointer.h
     src/pointer.cpp
+    src/preferences.h
+    src/preferences.cpp
+    src/settings.h
+    src/settings.cpp
 )
 
 set(PKG_API_LIB api-18)  #  A dir in opencpn-libs/ e. g., api-17 or api-16
